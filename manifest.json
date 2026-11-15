@@ -1,0 +1,24 @@
+{
+  "id": "todo",
+  "name": "Задачи",
+  "version": "0.1.0",
+  "url": "local:todo",
+  "backend_entrypoint": "shtab_todo.main:register",
+  "frontend": {
+    "entry": "frontend/index.js",
+    "pages": [
+      {
+        "path": "/plugins/todo",
+        "element": "shtab-todo"
+      }
+    ],
+    "menu_items": [
+      {
+        "slot": "sidebar.main",
+        "title": "Задачи",
+        "path": "/plugins/todo",
+        "order": 20
+      }
+    ]
+  }
+}

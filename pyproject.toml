@@ -1,0 +1,23 @@
+[project]
+name = "shtab-todo"
+version = "0.1.0"
+description = "Плагин задач Shtab: список и Kanban"
+requires-python = ">=3.13"
+dependencies = [
+    "shtab-core>=0.1.0",
+    "fastapi>=0.140",
+    "sqlalchemy[asyncio]>=2.1",
+    "alembic>=1.20",
+    "uuid6>=2025.0.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/shtab_todo"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"manifest.json" = "shtab_todo/manifest.json"
+"frontend" = "shtab_todo/frontend"
