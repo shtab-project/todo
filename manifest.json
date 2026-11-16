@@ -1,7 +1,7 @@
 {
   "id": "todo",
   "name": "Задачи",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "url": "local:todo",
   "backend_entrypoint": "shtab_todo.main:register",
   "frontend": {
