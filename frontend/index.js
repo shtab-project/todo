@@ -42,6 +42,9 @@ class TodoElement extends HTMLElement {
       const { user } = await response.json();
       if (signal.aborted) return;
       this.user = user;
+      const assignees = await fetch('/api/plugins/todo/assignees', { credentials: 'same-origin', signal });
+      if (!assignees.ok) throw new Error('Не удалось загрузить исполнителей. Обновите страницу.');
+      this.assignees = await assignees.json();
       this.store = new TaskStore(user);
       await this.store.load();
       if (signal.aborted) return;
@@ -86,7 +89,7 @@ class TodoElement extends HTMLElement {
           <label>Описание<textarea name="description" rows="4" placeholder="Детали, ссылки, мысли — всё, что пригодится"></textarea></label>
           <label>Срок выполнения<input name="due_date" type="date" max="9999-12-31"></label>
           <div class="form-columns"><label>Статус<select name="status">${statusOptions('new')}</select></label>
-            <label>Исполнитель<select name="assignee_id"><option value="">Не назначен</option><option value="${escape(this.user.id)}">Я — ${escape(this.user.name || this.user.username)}</option></select></label></div>
+            <label>Исполнитель<select name="assignee_id">${this.assigneeOptions()}</select></label></div>
           <p class="form-error" role="alert" hidden></p>
           <div class="delete-confirm" hidden><p>Удалить задачу? Отменить это действие не получится.</p><div><button type="button" class="button danger" data-action="confirm-delete">Удалить задачу</button><button type="button" class="button" data-action="keep">Оставить</button></div></div>
         </div>
@@ -198,7 +201,15 @@ class TodoElement extends HTMLElement {
   }
 
   assignee(task) {
-    return task.assignee_id === this.user.id ? this.user.name || this.user.username : '';
+    const person = this.assignees.find((user) => user.id === task.assignee_id);
+    return person ? person.name || person.username : task.assignee_id ? 'Пользователь недоступен' : '';
+  }
+
+  assigneeOptions(task) {
+    const users = [...this.assignees].sort((a, b) => Number(b.id === this.user.id) - Number(a.id === this.user.id));
+    const options = users.map((user) => `<option value="${escape(user.id)}">${user.id === this.user.id ? 'Я — ' : ''}${escape(user.name || user.username)} (@${escape(user.username)})</option>`).join('');
+    const missing = task?.assignee_id && !users.some((user) => user.id === task.assignee_id);
+    return `<option value="">Не назначен</option>${options}${missing ? `<option value="${escape(task.assignee_id)}">Пользователь недоступен</option>` : ''}`;
   }
 
   initials(name) {
@@ -336,6 +347,7 @@ class TodoElement extends HTMLElement {
     form.elements.description.value = task?.description ?? '';
     form.elements.due_date.value = task?.due_date ?? '';
     form.elements.status.value = task?.status ?? status;
+    form.elements.assignee_id.innerHTML = this.assigneeOptions(task);
     form.elements.assignee_id.value = task?.assignee_id ?? '';
     dialog.querySelector('h2').textContent = task ? 'Задача' : 'Новая задача';
     dialog.querySelector('[type="submit"]').textContent = task ? 'Сохранить изменения' : 'Создать задачу';

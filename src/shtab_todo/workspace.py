@@ -21,6 +21,21 @@ Factory = Annotated[async_sessionmaker[AsyncSession], Depends(get_session_factor
 Scope = Literal["private", "shared"]
 
 
+class Assignee(BaseModel):
+    id: UUID
+    name: str
+    username: str
+
+
+@router.get("/assignees", response_model=list[Assignee])
+async def list_assignees(_: CurrentUser, factory: Factory):
+    async with factory() as session:
+        rows = await session.execute(
+            select(User.id, User.name, User.username).order_by(User.name, User.username)
+        )
+        return [dict(row._mapping) for row in rows]
+
+
 class Workspace(Base):
     __tablename__ = "todo_workspaces"
     key: Mapped[str] = mapped_column(String(64), primary_key=True)

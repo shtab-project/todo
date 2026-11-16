@@ -13,15 +13,24 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from shtab_core.db import get_session_factory
 from shtab_core.dependencies import current_user
+from shtab_core.models import User
 
 
 @pytest_asyncio.fixture
 async def api():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
+        await connection.run_sync(User.__table__.create)
         await connection.run_sync(lambda sync: Base.metadata.tables["todo_workspaces"].create(sync))
     factory = async_sessionmaker(engine, expire_on_commit=False)
     user = SimpleNamespace(id=uuid4(), is_admin=False, is_trusted=False)
+    async with factory.begin() as session:
+        session.add_all(
+            [
+                User(id=user.id, oidc_sub="owner", username="owner", name="Owner"),
+                User(id=uuid4(), oidc_sub="colleague", username="colleague", name="Colleague"),
+            ]
+        )
     app = FastAPI()
     app.include_router(router)
     app.dependency_overrides[current_user] = lambda: user
@@ -31,6 +40,26 @@ async def api():
     ) as client:
         yield client, user
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_assign_colleague_and_preserve_assignment_on_edit(api):
+    client, _ = api
+    response = await client.get("/api/plugins/todo/assignees")
+    assert response.status_code == 200
+    people = response.json()
+    assert all(set(person) == {"id", "name", "username"} for person in people)
+    colleague = next(person for person in people if person["username"] == "colleague")
+    task = {"id": str(uuid4()), "title": "Assigned", "assignee_id": colleague["id"]}
+    path = "/api/plugins/todo/workspace/shared"
+    saved = await client.patch(path, json={"revision": 0, "upsert": [task]})
+    assert saved.status_code == 200
+    state = saved.json()
+    assert state["tasks"][0]["assignee_id"] == colleague["id"]
+    task.update(status="done")
+    updated = await client.patch(path, json={"revision": state["revision"], "upsert": [task]})
+    assert updated.status_code == 200
+    assert updated.json()["tasks"][0]["assignee_id"] == colleague["id"]
 
 
 @pytest.mark.asyncio
