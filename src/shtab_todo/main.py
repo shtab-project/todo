@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter, FastAPI
 from shtab_core.dependencies import CurrentUser
+from shtab_todo.workspace import router as workspace_router
 
 router = APIRouter(prefix="/api/plugins/todo", tags=["todo"])
 
@@ -15,3 +16,4 @@ async def health(_: CurrentUser):
 def register(app: FastAPI) -> None:
     """Подключить роутер. Ручки задач будут добавлены следующим шагом."""
     app.include_router(router)
+    app.include_router(workspace_router)

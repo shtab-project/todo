@@ -43,6 +43,8 @@ class TodoElement extends HTMLElement {
       if (signal.aborted) return;
       this.user = user;
       this.store = new TaskStore(user);
+      await this.store.load();
+      if (signal.aborted) return;
       this.shell(signal);
     } catch (error) {
       if (!signal.aborted) this.showError(error.message);
@@ -62,6 +64,7 @@ class TodoElement extends HTMLElement {
           <button class="button primary" data-action="create">${icon('plus')}Новая задача</button>
         </header>
         <p class="storage-warning" role="alert" hidden></p>
+        <div class="task-scopes" role="group" aria-label="Доступ к задачам"><button data-scope="private">Личные задачи</button><button data-scope="shared">Задачи компании</button></div>
         <div class="board-controls"><div class="toolbar">
           <div class="view-switch" role="group" aria-label="Вид задач">
             <button data-view="board">${icon('board')}Доска</button>
@@ -81,13 +84,16 @@ class TodoElement extends HTMLElement {
         <div class="form-body">
           <label>Название <span class="required">*</span><input name="title" maxlength="200" required placeholder="Что нужно сделать?" autocomplete="off"></label>
           <label>Описание<textarea name="description" rows="4" placeholder="Детали, ссылки, мысли — всё, что пригодится"></textarea></label>
+          <label>Срок выполнения<input name="due_date" type="date" max="9999-12-31"></label>
           <div class="form-columns"><label>Статус<select name="status">${statusOptions('new')}</select></label>
             <label>Исполнитель<select name="assignee_id"><option value="">Не назначен</option><option value="${escape(this.user.id)}">Я — ${escape(this.user.name || this.user.username)}</option></select></label></div>
           <p class="form-error" role="alert" hidden></p>
           <div class="delete-confirm" hidden><p>Удалить задачу? Отменить это действие не получится.</p><div><button type="button" class="button danger" data-action="confirm-delete">Удалить задачу</button><button type="button" class="button" data-action="keep">Оставить</button></div></div>
         </div>
         <footer class="dialog-footer"><button type="button" class="delete-button" data-action="delete">Удалить</button><span></span><button type="button" class="button" data-action="cancel">Отмена</button><button class="button primary" type="submit">Создать задачу</button></footer>
-      </form></dialog>`;
+      </form></dialog>
+      <div class="task-menu" role="menu" aria-label="Действия с задачами" hidden></div>
+      <dialog class="task-delete-dialog" aria-labelledby="task-delete-heading"><div class="form-body"><h2 id="task-delete-heading">Удалить задачу?</h2><p class="task-delete-name"></p><p>Восстановить её не получится.</p></div><footer class="dialog-footer"><button class="button" data-action="cancel-menu-delete" autofocus>Отмена</button><button class="button danger" data-action="menu-confirm-delete">Удалить задачу</button></footer></dialog>`;
     const stylesheet = document.createElement('link');
     stylesheet.rel = 'stylesheet';
     stylesheet.href = new URL('./style.css', import.meta.url).href;
@@ -95,8 +101,42 @@ class TodoElement extends HTMLElement {
     stylesheet.addEventListener('error', () => this.showError('Не удалось загрузить оформление задач. Обновите страницу.'), { once: true, signal });
     this.shadowRoot.prepend(stylesheet);
     const options = { signal };
-    this.shadowRoot.addEventListener('click', (event) => this.click(event), options);
-    this.shadowRoot.addEventListener('change', (event) => this.change(event), options);
+    this.shadowRoot.addEventListener('contextmenu', (event) => {
+      if (!event.target.closest('.workspace') || event.target.closest('input, textarea, select')) return;
+      event.preventDefault();
+      this.openMenu(event.target, event.clientX, event.clientY);
+    }, options);
+    this.shadowRoot.addEventListener('keydown', (event) => {
+      const menu = this.shadowRoot.querySelector('.task-menu');
+      if (event.key === 'Escape' && !menu.hidden) {
+        event.preventDefault(); this.closeMenu(true); return;
+      }
+      if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
+        if (!event.target.closest('.workspace')) return;
+        event.preventDefault();
+        const rect = event.target.getBoundingClientRect();
+        this.openMenu(event.target, rect.left, rect.bottom);
+      }
+      if (event.target.closest('.task-menu') && ['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) {
+        event.preventDefault();
+        const items = [...menu.querySelectorAll('button')];
+        const index = items.indexOf(event.target);
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1
+          : (index + (event.key === 'ArrowUp' ? -1 : 1) + items.length) % items.length;
+        items[next].focus();
+      }
+      if (event.key === 'Tab' && !menu.hidden) this.closeMenu();
+    }, options);
+    document.addEventListener('pointerdown', (event) => {
+      if (!event.composedPath().includes(this.shadowRoot.querySelector('.task-menu'))) this.closeMenu();
+    }, options);
+    window.addEventListener('resize', () => this.closeMenu(), options);
+    document.addEventListener('scroll', () => this.closeMenu(), { ...options, capture: true });
+    this.shadowRoot.addEventListener('click', (event) => this.click(event).catch((error) => this.notify(error.message)), options);
+    this.shadowRoot.addEventListener('change', (event) => this.change(event).catch((error) => {
+      this.renderTasks();
+      this.notify(error.message);
+    }), options);
     this.shadowRoot.addEventListener('input', (event) => {
       if (event.target.closest('form')) this.shadowRoot.querySelector('.form-error').hidden = true;
     }, options);
@@ -107,7 +147,10 @@ class TodoElement extends HTMLElement {
     this.shadowRoot.querySelector('form').addEventListener('submit', (event) => this.save(event), options);
     this.shadowRoot.addEventListener('dragstart', (event) => this.dragStart(event), options);
     this.shadowRoot.addEventListener('dragover', (event) => this.dragOver(event), options);
-    this.shadowRoot.addEventListener('drop', (event) => this.drop(event), options);
+    this.shadowRoot.addEventListener('drop', (event) => this.drop(event).catch((error) => {
+      this.clearDrag();
+      this.notify(error.message);
+    }), options);
     this.shadowRoot.addEventListener('dragend', () => this.clearDrag(), options);
     this.renderTasks();
   }
@@ -120,7 +163,9 @@ class TodoElement extends HTMLElement {
   }
 
   renderTasks() {
+    this.closeMenu();
     const root = this.shadowRoot;
+    root.querySelectorAll('[data-scope]').forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.scope === this.store.scope)));
     const tasks = this.visibleTasks();
     const total = this.store.tasks.length;
     const done = this.store.tasks.filter((task) => task.status === 'done').length;
@@ -144,8 +189,8 @@ class TodoElement extends HTMLElement {
         const column = tasks.filter((task) => task.status === status.id);
         return `<section class="column ${status.id}" data-column="${status.id}" aria-label="${status.title}">
           <header class="column-header"><h2>${status.title}</h2><span class="column-count">${column.length}</span><button class="icon-button" data-action="create" data-status="${status.id}" aria-label="Добавить задачу: ${status.title}">${icon('plus')}</button></header>
-          <div class="column-tasks">${column.map((task) => this.card(task)).join('') || '<p class="column-empty">Нет задач</p>'}</div>
-          <button class="column-add" data-action="create" data-status="${status.id}">${icon('plus')}Добавить задачу</button></section>`;
+          <div class="column-tasks">${column.map((task) => this.card(task)).join('')}</div>
+          </section>`;
       }).join('')}</div>`;
     } else {
       region.innerHTML = `<ul class="task-list" aria-label="Список задач">${tasks.map((task) => this.row(task)).join('')}</ul>`;
@@ -169,14 +214,24 @@ class TodoElement extends HTMLElement {
     const assignee = this.assignee(task);
     return `<article class="task-card ${task.status}" draggable="true" data-task="${escape(task.id)}">
       <button class="card-content" data-action="edit" data-id="${escape(task.id)}"><h3>${escape(task.title)}</h3>${task.description ? `<p>${escape(task.description)}</p>` : ''}</button>
-      <footer><span class="avatar ${assignee ? 'assigned' : ''}" title="${escape(assignee || 'Без исполнителя')}">${assignee ? escape(this.initials(assignee)) : '—'}</span></footer></article>`;
+      <footer>${this.deadline(task)}<span class="avatar ${assignee ? 'assigned' : ''}" title="${escape(assignee || 'Без исполнителя')}">${assignee ? escape(this.initials(assignee)) : '—'}</span></footer></article>`;
+  }
+
+  deadline(task) {
+    if (!task.due_date) return '';
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const overdue = task.status !== 'done' && task.due_date < today;
+    const date = new Intl.DateTimeFormat('ru', { day: 'numeric', month: 'short', year: 'numeric' })
+      .format(new Date(`${task.due_date}T00:00:00`));
+    return `<time class="task-deadline ${overdue ? 'overdue' : ''}" datetime="${escape(task.due_date)}" title="Срок выполнения">${icon('calendar')}${overdue ? 'Просрочено · ' : 'До '}${escape(date)}</time>`;
   }
 
   row(task) {
     const assignee = this.assignee(task);
     const date = new Intl.DateTimeFormat('ru', { day: 'numeric', month: 'short' }).format(new Date(task.updated_at));
     return `<li class="task-row ${task.status}"><button class="complete-button" data-action="complete" data-id="${escape(task.id)}" aria-label="${task.status === 'done' ? 'Вернуть в новые' : 'Завершить'}: ${escape(task.title)}">${task.status === 'done' ? icon('check') : ''}</button>
-      <button class="row-content" data-action="edit" data-id="${escape(task.id)}"><span class="row-title">${escape(task.title)}</span>${task.description ? `<span class="row-description">${escape(task.description)}</span>` : ''}</button>
+      <button class="row-content" data-action="edit" data-id="${escape(task.id)}"><span class="row-title">${escape(task.title)}</span>${task.description ? `<span class="row-description">${escape(task.description)}</span>` : ''}${this.deadline(task)}</button>
       <div class="row-details">
         ${this.statusSelect(task)}
         <span class="row-assignee" title="${escape(assignee || 'Без исполнителя')}">
@@ -187,9 +242,23 @@ class TodoElement extends HTMLElement {
       </div></li>`;
   }
 
-  click(event) {
+  async click(event) {
     const button = event.target.closest('button');
     if (!button) return;
+    if (button.dataset.scope && button.dataset.scope !== this.store.scope) {
+      if (this.switching) return;
+      this.switching = true;
+      try {
+        const store = new TaskStore(this.user, button.dataset.scope);
+        await store.load();
+        this.store = store;
+        this.search = ''; this.filter = ''; this.mine = false;
+        this.shadowRoot.querySelector('input[type="search"]').value = '';
+        this.shadowRoot.querySelector('.status-filter').value = '';
+        this.renderTasks();
+      } finally { this.switching = false; }
+      return;
+    }
     if (button.dataset.view) {
       this.store.view = button.dataset.view;
       this.store.persist();
@@ -197,6 +266,27 @@ class TodoElement extends HTMLElement {
       return;
     }
     const action = button.dataset.action;
+    this.closeMenu();
+    if (action === 'menu-delete') {
+      const task = this.store.tasks.find((item) => item.id === button.dataset.id);
+      if (!task || !this.canDelete(task)) return;
+      this.pendingDeleteId = task.id;
+      const dialog = this.shadowRoot.querySelector('.task-delete-dialog');
+      dialog.querySelector('.task-delete-name').textContent = task.title;
+      dialog.showModal();
+    }
+    if (action === 'cancel-menu-delete') this.shadowRoot.querySelector('.task-delete-dialog').close();
+    if (action === 'menu-confirm-delete' && this.pendingDeleteId) {
+      if (button.disabled) return;
+      button.disabled = true;
+      try {
+        await this.store.remove(this.pendingDeleteId);
+        this.shadowRoot.querySelector('.task-delete-dialog').close();
+        this.pendingDeleteId = null;
+        this.renderTasks();
+        this.notify('Задача удалена');
+      } finally { button.disabled = false; }
+    }
     if (action === 'create') this.openEditor(null, button.dataset.status || 'new');
     if (action === 'edit') this.openEditor(button.dataset.id);
     if (action === 'cancel') this.shadowRoot.querySelector('dialog').close();
@@ -209,27 +299,27 @@ class TodoElement extends HTMLElement {
     }
     if (action === 'complete') {
       const task = this.store.tasks.find((item) => item.id === button.dataset.id);
-      this.store.changeStatus(task.id, task.status === 'done' ? 'new' : 'done');
+      await this.store.changeStatus(task.id, task.status === 'done' ? 'new' : 'done');
       this.renderTasks();
       this.notify(task.status === 'done' ? 'Задача возвращена в новые' : 'Задача выполнена');
     }
     if (action === 'delete' || action === 'keep') this.shadowRoot.querySelector('.delete-confirm').hidden = action === 'keep';
     if (action === 'confirm-delete' && this.editingId) {
-      this.store.remove(this.editingId);
+      await this.store.remove(this.editingId);
       this.shadowRoot.querySelector('dialog').close();
       this.renderTasks();
       this.notify('Задача удалена');
     }
   }
 
-  change(event) {
+  async change(event) {
     if (event.target.matches('.status-filter')) {
       this.filter = event.target.value;
       this.renderTasks();
     }
     const id = event.target.dataset.taskStatus;
     if (id) {
-      this.store.changeStatus(id, event.target.value);
+      await this.store.changeStatus(id, event.target.value);
       this.renderTasks();
       this.shadowRoot.querySelector(`[data-task-status="${CSS.escape(id)}"]`)?.focus();
       this.notify('Статус изменён');
@@ -244,22 +334,26 @@ class TodoElement extends HTMLElement {
     form.reset();
     form.elements.title.value = task?.title ?? '';
     form.elements.description.value = task?.description ?? '';
+    form.elements.due_date.value = task?.due_date ?? '';
     form.elements.status.value = task?.status ?? status;
     form.elements.assignee_id.value = task?.assignee_id ?? '';
     dialog.querySelector('h2').textContent = task ? 'Задача' : 'Новая задача';
     dialog.querySelector('[type="submit"]').textContent = task ? 'Сохранить изменения' : 'Создать задачу';
-    dialog.querySelector('[data-action="delete"]').hidden = !task;
+    dialog.querySelector('[data-action="delete"]').hidden = !task || !this.canDelete(task);
     dialog.querySelector('.delete-confirm').hidden = true;
     dialog.querySelector('.form-error').hidden = true;
     dialog.showModal();
     form.elements.title.focus();
   }
 
-  save(event) {
+  async save(event) {
     event.preventDefault();
     const form = event.target;
+    const submit = form.querySelector('[type="submit"]');
+    if (submit.disabled) return;
+    submit.disabled = true;
     try {
-      this.store.save(Object.fromEntries(new FormData(form)), this.editingId);
+      await this.store.save(Object.fromEntries(new FormData(form)), this.editingId);
       this.shadowRoot.querySelector('dialog').close();
       this.renderTasks();
       this.notify(this.editingId ? 'Изменения сохранены' : 'Задача создана');
@@ -268,6 +362,8 @@ class TodoElement extends HTMLElement {
       message.textContent = error.message;
       message.hidden = false;
       form.elements.title.focus();
+    } finally {
+      submit.disabled = false;
     }
   }
 
@@ -275,6 +371,34 @@ class TodoElement extends HTMLElement {
     clearTimeout(this.toastTimer);
     this.shadowRoot.querySelector('.toast').textContent = message;
     this.toastTimer = setTimeout(() => { this.shadowRoot.querySelector('.toast').textContent = ''; }, 3500);
+  }
+
+  canDelete(task) {
+    return task.author_id === this.user.id || this.user.is_admin || this.user.is_trusted;
+  }
+
+  closeMenu(restoreFocus = false) {
+    const menu = this.shadowRoot.querySelector('.task-menu');
+    if (!menu || menu.hidden) return;
+    menu.hidden = true;
+    if (restoreFocus) this.menuTrigger?.focus();
+  }
+
+  openMenu(target, x, y) {
+    const card = target.closest('[data-task], .task-row');
+    const id = card?.dataset.task || card?.querySelector('[data-action="edit"]')?.dataset.id;
+    const task = this.store.tasks.find((item) => item.id === id);
+    const status = task?.status || target.closest('[data-column]')?.dataset.column || 'new';
+    const menu = this.shadowRoot.querySelector('.task-menu');
+    this.menuTrigger = target.closest('button') || this.shadowRoot.querySelector('[data-action="create"]');
+    menu.innerHTML = `<button role="menuitem" data-action="create" data-status="${escape(status)}">${icon('plus')}Создать задачу</button>
+      ${task ? `<button role="menuitem" data-action="edit" data-id="${escape(task.id)}">${icon('task')}Открыть задачу</button>` : ''}
+      ${task && this.canDelete(task) ? `<button role="menuitem" class="menu-danger" data-action="menu-delete" data-id="${escape(task.id)}">${icon('close')}Удалить задачу</button>` : ''}`;
+    menu.hidden = false;
+    const rect = menu.getBoundingClientRect();
+    menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - rect.width - 8))}px`;
+    menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - rect.height - 8))}px`;
+    menu.querySelector('button').focus({ preventScroll: true });
   }
 
   dragStart(event) {
@@ -295,11 +419,11 @@ class TodoElement extends HTMLElement {
     column.classList.add('drop-target');
   }
 
-  drop(event) {
+  async drop(event) {
     const column = event.target.closest('[data-column]');
     if (!column || !this.draggedId) return;
     event.preventDefault();
-    this.store.changeStatus(this.draggedId, column.dataset.column);
+    await this.store.changeStatus(this.draggedId, column.dataset.column);
     this.clearDrag();
     this.renderTasks();
     this.notify('Задача перемещена');

@@ -6,6 +6,7 @@ from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from shtab_todo import models  # noqa: F401 — регистрирует таблицы Todo
+from shtab_todo import workspace  # noqa: F401 — регистрирует рабочие пространства
 from shtab_todo.constants import MIGRATION_VERSION_TABLE
 from shtab_todo.db import Base
 

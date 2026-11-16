@@ -107,7 +107,7 @@ def test_deleting_assignee_keeps_task_and_author_cannot_be_deleted(session):
 
 def test_migration_matches_models_and_downgrade_preserves_core(database):
     assert "todo_tasks" not in CoreBase.metadata.tables
-    assert set(Base.metadata.tables) == {"todo_tasks"}
+    assert set(Base.metadata.tables) == {"todo_tasks", "todo_workspaces"}
     with database.begin() as connection:
         config = migration_config()
         config.attributes["connection"] = connection
@@ -115,10 +115,11 @@ def test_migration_matches_models_and_downgrade_preserves_core(database):
         command.upgrade(config, "head")
         assert (
             connection.scalar(text("SELECT version_num FROM alembic_version_todo"))
-            == "todo_0001"
+            == "todo_0002"
         )
         command.downgrade(config, "base")
         assert "todo_tasks" not in inspect(connection).get_table_names()
+        assert "todo_workspaces" not in inspect(connection).get_table_names()
         assert "users" in inspect(connection).get_table_names()
         assert (
             connection.scalar(text("SELECT version_num FROM alembic_version")) == "0003"
