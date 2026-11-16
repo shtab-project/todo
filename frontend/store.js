@@ -5,19 +5,22 @@ export const statuses = [
   { id: 'done', title: 'Готово' },
 ];
 
-function examples(user) {
-  const now = new Date().toISOString();
-  return [
-    ['Записать идеи для заметок', 'Собрать мысли в одном месте, чтобы ничего не потерялось.', 'new', null],
-    ['Наметить три главных дела на неделю', 'Оставить достаточно времени на непредвиденное.', 'new', user.id],
-    ['Разобрать входящие', '', 'new', null],
-    ['Попробовать доску задач', 'Перетащите карточку в соседнюю колонку или измените статус в редакторе.', 'in_progress', user.id],
-    ['Проверить интерфейс на телефоне', 'Переключиться на список и создать небольшую задачу.', 'in_progress', null],
-    ['Собрать всё в одном месте', 'Первый шаг уже сделан.', 'done', user.id],
-  ].map(([title, description, status, assignee_id]) => ({
-    id: crypto.randomUUID(), title, description, status, assignee_id,
-    author_id: user.id, created_at: now, updated_at: now,
-  }));
+// В 0.1.0 примеры сохранялись как обычные задачи. Убираем только исходные карточки.
+const legacyExamples = [
+  ['Записать идеи для заметок', 'Собрать мысли в одном месте, чтобы ничего не потерялось.', 'new', false],
+  ['Наметить три главных дела на неделю', 'Оставить достаточно времени на непредвиденное.', 'new', true],
+  ['Разобрать входящие', '', 'new', false],
+  ['Попробовать доску задач', 'Перетащите карточку в соседнюю колонку или измените статус в редакторе.', 'in_progress', true],
+  ['Проверить интерфейс на телефоне', 'Переключиться на список и создать небольшую задачу.', 'in_progress', false],
+  ['Собрать всё в одном месте', 'Первый шаг уже сделан.', 'done', true],
+];
+
+function isUnchangedExample(task, userId) {
+  return task.created_at === task.updated_at && task.author_id === userId
+    && legacyExamples.some(([title, description, status, assignedToSelf]) => (
+      task.title === title && task.description === description && task.status === status
+      && task.assignee_id === (assignedToSelf ? userId : null)
+    ));
 }
 
 function validTask(task) {
@@ -34,7 +37,7 @@ export class TaskStore {
     this.user = user;
     this.key = `shtab.todo.preview.v1.${user.id}`;
     this.warning = '';
-    this.tasks = examples(user);
+    this.tasks = [];
     this.view = matchMedia('(max-width: 640px)').matches ? 'list' : 'board';
     try {
       const saved = localStorage.getItem(this.key);
@@ -44,8 +47,11 @@ export class TaskStore {
           || new Set(data.tasks.map((task) => task.id)).size !== data.tasks.length) {
           throw new Error('Invalid saved tasks');
         }
-        this.tasks = data.tasks;
+        this.tasks = data.legacyExamplesRemoved === true
+          ? data.tasks
+          : data.tasks.filter((task) => !isUnchangedExample(task, user.id));
         if (['list', 'board'].includes(data.view)) this.view = data.view;
+        if (data.legacyExamplesRemoved !== true) this.persist();
       } else {
         this.persist();
       }
@@ -59,7 +65,9 @@ export class TaskStore {
   persist() {
     if (this.memoryOnly) return;
     try {
-      localStorage.setItem(this.key, JSON.stringify({ tasks: this.tasks, view: this.view }));
+      localStorage.setItem(this.key, JSON.stringify({
+        tasks: this.tasks, view: this.view, legacyExamplesRemoved: true,
+      }));
     } catch {
       this.memoryOnly = true;
       this.warning = 'Хранилище браузера недоступно. Изменения сохранятся только до закрытия страницы.';
