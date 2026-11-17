@@ -249,20 +249,28 @@ class TodoElement extends HTMLElement {
 
   card(task) {
     const assignee = this.assignee(task);
+    const deadline = this.deadline(task);
     return `<article class="task-card ${task.status}${isOverdue(task) ? ' overdue' : ''}" draggable="true" data-task="${escape(task.id)}">
-      <button class="card-content" data-action="edit" data-id="${escape(task.id)}"><h3>${escape(task.title)}</h3>${task.description ? `<p>${escape(task.description)}</p>` : ''}</button>
-      <footer>${this.checklistProgress(task)}${this.deadline(task)}<span class="avatar ${assignee ? 'assigned' : ''}" title="${escape(assignee || 'Без исполнителя')}">${assignee ? escape(this.initials(assignee)) : '—'}</span></footer></article>`;
+      <button class="card-content" type="button" data-action="edit" data-id="${escape(task.id)}">
+        <span class="card-title">${escape(task.title)}</span>
+        ${assignee ? `<span class="avatar assigned" title="${escape(assignee)}">${escape(this.initials(assignee))}</span>` : ''}
+        ${task.description ? `<span class="card-description">${escape(task.description)}</span>` : ''}
+        ${this.checklistProgress(task)}
+      </button>
+      ${deadline ? `<footer>${deadline}</footer>` : ''}</article>`;
   }
 
   deadline(task) {
     if (!task.due_date && !task.due_at) return '';
     const overdue = isOverdue(task);
     const date = new Date(task.due_at || `${task.due_date}T00:00:00`);
-    const label = new Intl.DateTimeFormat('ru', {
-      day: 'numeric', month: 'short', year: 'numeric',
-      ...(task.due_at && { hour: '2-digit', minute: '2-digit' }),
+    const dateLabel = new Intl.DateTimeFormat('ru', {
+      day: 'numeric', month: 'short',
+      ...(date.getFullYear() !== new Date().getFullYear() && { year: 'numeric' }),
     }).format(date);
-    return `<time class="task-deadline ${overdue ? 'overdue' : ''}" data-deadline="${escape(task.id)}" datetime="${escape(task.due_at || task.due_date)}" title="Срок выполнения">${icon('calendar')}${overdue ? 'Задача просрочена · ' : 'До '}${escape(label)}</time>`;
+    const timeLabel = task.due_at ? new Intl.DateTimeFormat('ru', { hour: '2-digit', minute: '2-digit' }).format(date) : '';
+    const label = timeLabel ? `${dateLabel} · ${timeLabel}` : dateLabel;
+    return `<time class="task-deadline ${overdue ? 'overdue' : ''}" data-deadline="${escape(task.id)}" datetime="${escape(task.due_at || task.due_date)}" title="Срок выполнения">${icon('calendar')}<span>${overdue ? 'Задача просрочена · ' : ''}${escape(label)}</span></time>`;
   }
 
   row(task) {
