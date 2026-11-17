@@ -5,7 +5,7 @@ from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AwareDatetime, BaseModel, Field, field_validator
 from sqlalchemy import JSON, Integer, String, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -43,16 +43,38 @@ class Workspace(Base):
     tasks: Mapped[list] = mapped_column(JSON, default=list)
 
 
+class ChecklistItem(BaseModel):
+    id: UUID
+    text: str = Field(min_length=1, max_length=500)
+    done: bool = False
+
+    @field_validator("text")
+    @classmethod
+    def trim_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Пункт чек-листа не может быть пустым")
+        return value.strip()
+
+
 class TaskData(BaseModel):
     id: UUID
     title: str = Field(min_length=1, max_length=200)
     description: str = Field(default="", max_length=100000)
     status: Literal["new", "in_progress", "done"] = "new"
     assignee_id: UUID | None = None
+    checklist: list[ChecklistItem] = Field(default_factory=list, max_length=200)
     due_date: date | None = None
+    due_at: AwareDatetime | None = None
     author_id: UUID | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+    @field_validator("checklist")
+    @classmethod
+    def unique_items(cls, value: list[ChecklistItem]) -> list[ChecklistItem]:
+        if len({item.id for item in value}) != len(value):
+            raise ValueError("Повторяющиеся пункты чек-листа")
+        return value
 
     @field_validator("title")
     @classmethod
@@ -111,6 +133,12 @@ async def apply(
         if importing and previous:
             continue
         value = task.model_dump(mode="json")
+        if previous and "due_at" not in task.model_fields_set:
+            value["due_at"] = (
+                previous.get("due_at") if value["due_date"] == previous.get("due_date") else None
+            )
+        if previous and "checklist" not in task.model_fields_set:
+            value["checklist"] = previous.get("checklist", [])
         value["author_id"] = previous["author_id"] if previous else str(user_id)
         value["created_at"] = (
             previous["created_at"]

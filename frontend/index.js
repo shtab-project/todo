@@ -1,4 +1,4 @@
-import { TaskStore, statuses } from './store.js';
+import { TaskStore, statuses, createId, deadlineParts, isOverdue } from './store.js';
 
 const escape = (value = '') => String(value).replace(/[&<>"']/g, (character) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
@@ -33,6 +33,7 @@ class TodoElement extends HTMLElement {
   disconnectedCallback() {
     this.controller.abort();
     clearTimeout(this.toastTimer);
+    clearInterval(this.deadlineTimer);
   }
 
   async start(signal) {
@@ -87,7 +88,13 @@ class TodoElement extends HTMLElement {
         <div class="form-body">
           <label>Название <span class="required">*</span><input name="title" maxlength="200" required placeholder="Что нужно сделать?" autocomplete="off"></label>
           <label>Описание<textarea name="description" rows="4" placeholder="Детали, ссылки, мысли — всё, что пригодится"></textarea></label>
-          <label>Срок выполнения<input name="due_date" type="date" max="9999-12-31"></label>
+          <section class="checklist-editor" aria-labelledby="checklist-heading">
+            <h3 id="checklist-heading">Чек-лист</h3>
+            <div class="checklist-items"></div>
+            <button type="button" class="button" data-action="checklist-add">${icon('plus')}Добавить пункт</button>
+          </section>
+          <div class="form-columns"><label>Дата срока<input name="due_date" type="date" max="9999-12-31"></label>
+            <label>Время срока<input name="due_time" type="time" step="60"></label></div>
           <div class="form-columns"><label>Статус<select name="status">${statusOptions('new')}</select></label>
             <label>Исполнитель<select name="assignee_id">${this.assigneeOptions()}</select></label></div>
           <p class="form-error" role="alert" hidden></p>
@@ -110,6 +117,11 @@ class TodoElement extends HTMLElement {
       this.openMenu(event.target, event.clientX, event.clientY);
     }, options);
     this.shadowRoot.addEventListener('keydown', (event) => {
+      if (event.target.matches('.checklist-text') && event.key === 'Enter') {
+        event.preventDefault();
+        if (event.target.value.trim()) this.addChecklistItem();
+        return;
+      }
       const menu = this.shadowRoot.querySelector('.task-menu');
       if (event.key === 'Escape' && !menu.hidden) {
         event.preventDefault(); this.closeMenu(true); return;
@@ -156,6 +168,20 @@ class TodoElement extends HTMLElement {
     }), options);
     this.shadowRoot.addEventListener('dragend', () => this.clearDrag(), options);
     this.renderTasks();
+    this.deadlineTimer = setInterval(() => this.refreshDeadlines(), 1000);
+    document.addEventListener('visibilitychange', () => this.refreshDeadlines(), options);
+  }
+
+  refreshDeadlines() {
+    this.shadowRoot.querySelectorAll('[data-deadline]').forEach((node) => {
+      const task = this.store.tasks.find((item) => item.id === node.dataset.deadline);
+      if (!task) return;
+      const overdue = isOverdue(task);
+      if (node.classList.contains('overdue') === overdue) return;
+      node.outerHTML = this.deadline(task);
+      const card = this.shadowRoot.querySelector(`[data-task="${CSS.escape(task.id)}"]`);
+      card?.classList.toggle('overdue', overdue);
+    });
   }
 
   visibleTasks() {
@@ -223,26 +249,27 @@ class TodoElement extends HTMLElement {
 
   card(task) {
     const assignee = this.assignee(task);
-    return `<article class="task-card ${task.status}" draggable="true" data-task="${escape(task.id)}">
+    return `<article class="task-card ${task.status}${isOverdue(task) ? ' overdue' : ''}" draggable="true" data-task="${escape(task.id)}">
       <button class="card-content" data-action="edit" data-id="${escape(task.id)}"><h3>${escape(task.title)}</h3>${task.description ? `<p>${escape(task.description)}</p>` : ''}</button>
-      <footer>${this.deadline(task)}<span class="avatar ${assignee ? 'assigned' : ''}" title="${escape(assignee || 'Без исполнителя')}">${assignee ? escape(this.initials(assignee)) : '—'}</span></footer></article>`;
+      <footer>${this.checklistProgress(task)}${this.deadline(task)}<span class="avatar ${assignee ? 'assigned' : ''}" title="${escape(assignee || 'Без исполнителя')}">${assignee ? escape(this.initials(assignee)) : '—'}</span></footer></article>`;
   }
 
   deadline(task) {
-    if (!task.due_date) return '';
-    const now = new Date();
-    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-    const overdue = task.status !== 'done' && task.due_date < today;
-    const date = new Intl.DateTimeFormat('ru', { day: 'numeric', month: 'short', year: 'numeric' })
-      .format(new Date(`${task.due_date}T00:00:00`));
-    return `<time class="task-deadline ${overdue ? 'overdue' : ''}" datetime="${escape(task.due_date)}" title="Срок выполнения">${icon('calendar')}${overdue ? 'Просрочено · ' : 'До '}${escape(date)}</time>`;
+    if (!task.due_date && !task.due_at) return '';
+    const overdue = isOverdue(task);
+    const date = new Date(task.due_at || `${task.due_date}T00:00:00`);
+    const label = new Intl.DateTimeFormat('ru', {
+      day: 'numeric', month: 'short', year: 'numeric',
+      ...(task.due_at && { hour: '2-digit', minute: '2-digit' }),
+    }).format(date);
+    return `<time class="task-deadline ${overdue ? 'overdue' : ''}" data-deadline="${escape(task.id)}" datetime="${escape(task.due_at || task.due_date)}" title="Срок выполнения">${icon('calendar')}${overdue ? 'Задача просрочена · ' : 'До '}${escape(label)}</time>`;
   }
 
   row(task) {
     const assignee = this.assignee(task);
     const date = new Intl.DateTimeFormat('ru', { day: 'numeric', month: 'short' }).format(new Date(task.updated_at));
     return `<li class="task-row ${task.status}"><button class="complete-button" data-action="complete" data-id="${escape(task.id)}" aria-label="${task.status === 'done' ? 'Вернуть в новые' : 'Завершить'}: ${escape(task.title)}">${task.status === 'done' ? icon('check') : ''}</button>
-      <button class="row-content" data-action="edit" data-id="${escape(task.id)}"><span class="row-title">${escape(task.title)}</span>${task.description ? `<span class="row-description">${escape(task.description)}</span>` : ''}${this.deadline(task)}</button>
+      <button class="row-content" data-action="edit" data-id="${escape(task.id)}"><span class="row-title">${escape(task.title)}</span>${this.checklistProgress(task)}${task.description ? `<span class="row-description">${escape(task.description)}</span>` : ''}${this.deadline(task)}</button>
       <div class="row-details">
         ${this.statusSelect(task)}
         <span class="row-assignee" title="${escape(assignee || 'Без исполнителя')}">
@@ -251,6 +278,48 @@ class TodoElement extends HTMLElement {
         </span>
         <time class="row-date" datetime="${escape(task.updated_at)}" title="Дата обновления">${icon('calendar')}${date}</time>
       </div></li>`;
+  }
+
+  checklistProgress(task) {
+    const items = task.checklist ?? [];
+    if (!items.length) return '';
+    const done = items.filter((item) => item.done).length;
+    return `<span class="checklist-progress" aria-label="Чек-лист: выполнено ${done} из ${items.length}">${icon('check')}${done}/${items.length}</span>`;
+  }
+
+  checklistRow(item) {
+    return `<div class="checklist-item" data-checklist-id="${escape(item.id)}">
+      <input type="checkbox" class="checklist-done" aria-label="Пункт выполнен" ${item.done ? 'checked' : ''}>
+      <input class="checklist-text" maxlength="500" aria-label="Текст пункта" placeholder="Что нужно сделать?" value="${escape(item.text)}">
+      <button type="button" class="icon-button" data-action="checklist-up" aria-label="Переместить пункт выше">↑</button>
+      <button type="button" class="icon-button" data-action="checklist-down" aria-label="Переместить пункт ниже">↓</button>
+      <button type="button" class="icon-button" data-action="checklist-remove" aria-label="Удалить пункт">${icon('close')}</button>
+    </div>`;
+  }
+
+  updateChecklistControls() {
+    const rows = [...this.shadowRoot.querySelectorAll('.checklist-item')];
+    rows.forEach((row, index) => {
+      row.querySelector('[data-action="checklist-up"]').disabled = index === 0;
+      row.querySelector('[data-action="checklist-down"]').disabled = index === rows.length - 1;
+    });
+    this.shadowRoot.querySelector('[data-action="checklist-add"]').disabled = rows.length >= 200;
+  }
+
+  addChecklistItem() {
+    const list = this.shadowRoot.querySelector('.checklist-items');
+    if (list.children.length >= 200) return;
+    list.insertAdjacentHTML('beforeend', this.checklistRow({ id: createId(), text: '', done: false }));
+    this.updateChecklistControls();
+    list.lastElementChild.querySelector('.checklist-text').focus();
+  }
+
+  readChecklist() {
+    return [...this.shadowRoot.querySelectorAll('.checklist-item')].map((row) => ({
+      id: row.dataset.checklistId,
+      text: row.querySelector('.checklist-text').value,
+      done: row.querySelector('.checklist-done').checked,
+    })).filter((item) => item.text.trim());
   }
 
   async click(event) {
@@ -277,6 +346,19 @@ class TodoElement extends HTMLElement {
       return;
     }
     const action = button.dataset.action;
+    if (action === 'checklist-add') { this.addChecklistItem(); return; }
+    if (['checklist-up', 'checklist-down', 'checklist-remove'].includes(action)) {
+      const row = button.closest('.checklist-item');
+      if (action === 'checklist-up' && row.previousElementSibling) row.previousElementSibling.before(row);
+      if (action === 'checklist-down' && row.nextElementSibling) row.nextElementSibling.after(row);
+      if (action === 'checklist-remove') {
+        const next = row.nextElementSibling || row.previousElementSibling;
+        row.remove();
+        (next?.querySelector('.checklist-text') || this.shadowRoot.querySelector('[data-action="checklist-add"]')).focus();
+      } else row.querySelector('.checklist-text').focus();
+      this.updateChecklistControls();
+      return;
+    }
     this.closeMenu();
     if (action === 'menu-delete') {
       const task = this.store.tasks.find((item) => item.id === button.dataset.id);
@@ -345,7 +427,11 @@ class TodoElement extends HTMLElement {
     form.reset();
     form.elements.title.value = task?.title ?? '';
     form.elements.description.value = task?.description ?? '';
-    form.elements.due_date.value = task?.due_date ?? '';
+    dialog.querySelector('.checklist-items').innerHTML = (task?.checklist ?? []).map((item) => this.checklistRow(item)).join('');
+    this.updateChecklistControls();
+    const deadline = deadlineParts(task);
+    form.elements.due_date.value = deadline.date;
+    form.elements.due_time.value = deadline.time;
     form.elements.status.value = task?.status ?? status;
     form.elements.assignee_id.innerHTML = this.assigneeOptions(task);
     form.elements.assignee_id.value = task?.assignee_id ?? '';
@@ -365,7 +451,7 @@ class TodoElement extends HTMLElement {
     if (submit.disabled) return;
     submit.disabled = true;
     try {
-      await this.store.save(Object.fromEntries(new FormData(form)), this.editingId);
+      await this.store.save({ ...Object.fromEntries(new FormData(form)), checklist: this.readChecklist() }, this.editingId);
       this.shadowRoot.querySelector('dialog').close();
       this.renderTasks();
       this.notify(this.editingId ? 'Изменения сохранены' : 'Задача создана');

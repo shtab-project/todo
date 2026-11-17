@@ -125,3 +125,82 @@ async def test_delete_permissions(api, role):
     else:
         assert deleted.status_code == 200
         assert deleted.json()["tasks"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scope", ["private", "shared"])
+async def test_checklist_roundtrip_reorder_and_independent_status(api, scope):
+    client, _ = api
+    path = f"/api/plugins/todo/workspace/{scope}"
+    first = {"id": str(uuid4()), "text": "  Первый пункт  ", "done": False}
+    second = {"id": str(uuid4()), "text": "Второй пункт", "done": True}
+    task = {"id": str(uuid4()), "title": "Список", "checklist": [first, second]}
+    response = await client.patch(path, json={"revision": 0, "upsert": [task]})
+    assert response.status_code == 200
+    state = response.json()
+    saved = state["tasks"][0]
+    assert saved["checklist"][0]["text"] == "Первый пункт"
+    assert (await client.get(path)).json() == state
+    # Completing a task preserves unfinished items; old clients preserve the checklist.
+    response = await client.patch(path, json={
+        "revision": state["revision"],
+        "upsert": [{"id": task["id"], "title": "Список", "status": "done"}],
+    })
+    state = response.json()
+    assert state["tasks"][0]["checklist"] == saved["checklist"]
+    assert not state["tasks"][0]["checklist"][0]["done"]
+    # Reorder, edit and complete all items without completing the parent.
+    task.update(status="new", checklist=[second, {**first, "text": "Изменён", "done": True}])
+    response = await client.patch(path, json={"revision": state["revision"], "upsert": [task]})
+    state = response.json()
+    assert state["tasks"][0]["status"] == "new"
+    assert state["tasks"][0]["checklist"] == task["checklist"]
+    task["checklist"] = []
+    response = await client.patch(path, json={"revision": state["revision"], "upsert": [task]})
+    assert response.json()["tasks"][0]["checklist"] == []
+
+
+@pytest.mark.asyncio
+async def test_invalid_checklist_does_not_change_workspace(api):
+    client, _ = api
+    path = "/api/plugins/todo/workspace/private"
+    item = {"id": str(uuid4()), "text": "Пункт", "done": False}
+    for checklist in ([{**item, "text": "   "}], [item, item],
+                      [{**item, "text": "x" * 501}], [item] * 201):
+        response = await client.patch(path, json={
+            "revision": 0, "upsert": [{"id": str(uuid4()), "title": "Список", "checklist": checklist}],
+        })
+        assert response.status_code == 422
+    assert (await client.get(path)).json() == {"revision": 0, "tasks": []}
+
+
+@pytest.mark.asyncio
+async def test_deadline_time_roundtrip_and_legacy_edit(api):
+    client, _ = api
+    path = "/api/plugins/todo/workspace/private"
+    task = {"id": str(uuid4()), "title": "К 18:00", "due_date": "2026-11-17",
+            "due_at": "2026-11-17T15:00:00Z"}
+    response = await client.patch(path, json={"revision": 0, "upsert": [task]})
+    assert response.status_code == 200
+    state = response.json()
+    assert state["tasks"][0]["due_at"] == task["due_at"]
+    # A date-only client must preserve the time when changing unrelated fields.
+    task.pop("due_at")
+    task["status"] = "done"
+    response = await client.patch(path, json={"revision": state["revision"], "upsert": [task]})
+    state = response.json()
+    assert state["tasks"][0]["due_at"] == "2026-11-17T15:00:00Z"
+    # Changing the date through an old client clears the stale precise deadline.
+    task["due_date"] = "2026-11-18"
+    response = await client.patch(path, json={"revision": state["revision"], "upsert": [task]})
+    assert response.json()["tasks"][0]["due_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_deadline_requires_timezone(api):
+    client, _ = api
+    response = await client.patch("/api/plugins/todo/workspace/private", json={
+        "revision": 0, "upsert": [{"id": str(uuid4()), "title": "Срок",
+                                    "due_at": "2026-11-17T18:00:00"}],
+    })
+    assert response.status_code == 422

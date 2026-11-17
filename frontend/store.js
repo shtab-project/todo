@@ -1,5 +1,4 @@
-// Временное хранилище интерфейса. HTTP API задач будет подключён отдельно.
-function createId() {
+export function createId() {
   if (typeof globalThis.crypto.randomUUID === 'function') return globalThis.crypto.randomUUID();
   const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
   bytes[6] = (bytes[6] & 0x0f) | 0x40;
@@ -18,6 +17,25 @@ export function validDueDate(value) {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value) || value.startsWith('0000')) return false;
   const date = new Date(`${value}T00:00:00Z`);
   return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
+
+export function deadlineParts(task) {
+  if (!task?.due_at) return { date: task?.due_date ?? '', time: '' };
+  const date = new Date(task.due_at);
+  const pad = (part) => String(part).padStart(2, '0');
+  return {
+    date: `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`,
+    time: `${pad(date.getHours())}:${pad(date.getMinutes())}`,
+  };
+}
+
+export function isOverdue(task, now = new Date()) {
+  if (task.status === 'done') return false;
+  if (task.due_at) return Date.parse(task.due_at) <= now.getTime();
+  if (!task.due_date) return false;
+  const tomorrow = new Date(`${task.due_date}T00:00:00`);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  return tomorrow.getTime() <= now.getTime();
 }
 
 // В 0.1.0 примеры сохранялись как обычные задачи. Убираем только исходные карточки.
@@ -45,6 +63,7 @@ function validTask(task) {
     && (task.assignee_id === null || typeof task.assignee_id === 'string')
     && statuses.some((status) => status.id === task.status)
     && (task.due_date == null || validDueDate(task.due_date))
+    && (task.due_at == null || Number.isFinite(Date.parse(task.due_at)))
     && Number.isFinite(Date.parse(task.created_at)) && Number.isFinite(Date.parse(task.updated_at));
 }
 
@@ -133,6 +152,14 @@ export class TaskStore {
     if (dueDate !== null && !validDueDate(dueDate)) throw new Error('Укажите корректную дату срока выполнения.');
     const previous = id ? this.tasks.find((task) => task.id === id) : null;
     if (id && !previous) throw new Error('Задача уже удалена.');
+    let dueAt = input.due_at ?? previous?.due_at ?? null;
+    if (Object.hasOwn(input, 'due_time')) {
+      if (input.due_time && !dueDate) throw new Error('Для времени срока укажите дату.');
+      if (input.due_time && !/^([01]\d|2[0-3]):[0-5]\d$/.test(input.due_time)) throw new Error('Укажите корректное время срока.');
+      dueAt = input.due_time ? new Date(`${dueDate}T${input.due_time}:00`).toISOString() : null;
+    } else if (dueDate !== previous?.due_date && !input.due_at) {
+      dueAt = null;
+    }
     const now = new Date().toISOString();
     const task = {
       ...previous,
@@ -140,6 +167,10 @@ export class TaskStore {
       description: input.description.trim(), status: input.status,
       assignee_id: input.assignee_id || null,
       due_date: dueDate,
+      due_at: dueAt,
+      checklist: (input.checklist ?? previous?.checklist ?? [])
+        .filter((item) => item.text.trim())
+        .map((item) => ({ id: item.id, text: item.text.trim(), done: item.done })),
       author_id: previous?.author_id ?? this.user.id,
       created_at: previous?.created_at ?? now, updated_at: now,
     };
