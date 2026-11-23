@@ -5,8 +5,7 @@ from shtab_core.config import settings
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from shtab_todo import models  # noqa: F401 — регистрирует таблицы Todo
-from shtab_todo import workspace  # noqa: F401 — регистрирует рабочие пространства
+from shtab_todo import models  # noqa: F401 — Register Todo tables.
 from shtab_todo.constants import MIGRATION_VERSION_TABLE
 from shtab_todo.db import Base
 
@@ -14,7 +13,7 @@ config = context.config
 
 
 def include_name(name, type_, parent_names):
-    # Autogenerate не должен предлагать удаление таблиц ядра и других плагинов.
+    # Autogenerate must not propose dropping core or other plugins' tables.
     return type_ != "table" or name.startswith("todo_")
 
 

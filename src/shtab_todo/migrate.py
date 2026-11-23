@@ -1,4 +1,4 @@
-"""Миграции только Todo: python -m shtab_todo.migrate upgrade head."""
+"""Todo-only migrations: python -m shtab_todo.migrate upgrade head."""
 
 from pathlib import Path
 
@@ -14,8 +14,8 @@ def migration_config() -> Config:
 def main() -> None:
     cli = CommandLine(prog="python -m shtab_todo.migrate")
     options = cli.parser.parse_args()
-    if not hasattr(options, "cmd"):
-        cli.parser.error("Укажите команду, например: upgrade head")
+    if "cmd" not in vars(options):
+        cli.parser.error("Give a command, e.g. upgrade head")
     config = migration_config()
     config.cmd_opts = options
     cli.run_cmd(config, options)

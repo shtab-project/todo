@@ -4,14 +4,17 @@ from io import StringIO
 
 import pytest
 from alembic import command
+from shtab_core.config import settings
 from shtab_core.db import Base as CoreBase
+from shtab_core.db import get_session_factory as core_factory
 from shtab_core.models import User
-from shtab_todo.db import Base, get_session_factory
-from shtab_todo.migrate import migration_config
-from shtab_todo.models import Task, TaskStatus
 from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+
+from shtab_todo.db import Base, get_session_factory
+from shtab_todo.migrate import migration_config
+from shtab_todo.models import Task, TaskStatus
 
 
 @pytest.fixture
@@ -51,7 +54,7 @@ def user(session, subject):
 def test_task_defaults_and_update_timestamp(session):
     author = user(session, "author")
     task = Task(
-        title="Первая задача",
+        title="First task",
         author_id=author.id,
         updated_at=datetime(2000, 1, 1, tzinfo=UTC),
     )
@@ -61,7 +64,7 @@ def test_task_defaults_and_update_timestamp(session):
     assert task.status is TaskStatus.NEW
     assert task.description == "" and task.assignee_id is None
     assert task.created_at is not None
-    task.title = "Изменённая задача"
+    task.title = "Changed task"
     task.status = TaskStatus.IN_PROGRESS
     session.commit()
     assert task.updated_at.year > 2000
@@ -127,8 +130,6 @@ def test_migration_matches_models_and_downgrade_preserves_core(database):
 
 
 def test_postgresql_migration_sql(monkeypatch):
-    from shtab_core.config import settings
-
     monkeypatch.setattr(
         settings, "database_url", "postgresql+asyncpg://test:test@localhost/test"
     )
@@ -143,6 +144,4 @@ def test_postgresql_migration_sql(monkeypatch):
 
 
 def test_shared_session_factory():
-    from shtab_core.db import get_session_factory as core_factory
-
     assert get_session_factory() is core_factory()

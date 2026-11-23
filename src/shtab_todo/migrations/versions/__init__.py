@@ -1,1 +1,1 @@
-"""Версии схемы Todo."""
+"""Todo schema versions."""

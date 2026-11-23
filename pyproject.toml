@@ -1,7 +1,7 @@
 [project]
 name = "shtab-todo"
-version = "0.2.3"
-description = "Плагин задач Shtab: список и Kanban"
+version = "0.3.0"
+description = "Shtab tasks plugin: list and Kanban"
 requires-python = ">=3.13"
 dependencies = [
     "shtab-core>=0.1.0",

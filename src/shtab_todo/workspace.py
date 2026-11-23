@@ -1,111 +1,134 @@
 """Versioned task workspaces: private per user, shared per installation."""
 
-from datetime import UTC, date, datetime
-from typing import Annotated, Literal
+from collections.abc import Callable
+from datetime import UTC, datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import AwareDatetime, BaseModel, Field, field_validator
-from sqlalchemy import JSON, Integer, String, select
-from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from sqlalchemy.orm import Mapped, mapped_column
-
-from shtab_core.db import get_session_factory
+from fastapi import APIRouter, HTTPException
 from shtab_core.dependencies import CurrentUser
 from shtab_core.models import User
-from shtab_todo.db import Base
+from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from shtab_todo.dependencies import ReadSession, WriteSession
+from shtab_todo.models import Workspace
+from shtab_todo.schemas import (
+    Assignee,
+    Changes,
+    Legacy,
+    Scope,
+    TaskData,
+    WorkspaceSnapshot,
+)
 
 router = APIRouter(prefix="/api/plugins/todo", tags=["todo"])
-Factory = Annotated[async_sessionmaker[AsyncSession], Depends(get_session_factory)]
-Scope = Literal["private", "shared"]
+MAX_TASKS = 5000
 
+# Fields the assignee of someone else's task may not change; the status they may.
+PROTECTED_FIELDS: set[str] = set(
+    {
+        "title",
+        "description",
+        "priority",
+        "assignee_id",
+        "checklist",
+        "due_date",
+        "due_at",
+    }
+)
 
-class Assignee(BaseModel):
-    id: UUID
-    name: str
-    username: str
+Authorize = Callable[[TaskData, TaskData], None]
 
 
 @router.get("/assignees", response_model=list[Assignee])
-async def list_assignees(_: CurrentUser, factory: Factory):
-    async with factory() as session:
-        rows = await session.execute(
-            select(User.id, User.name, User.username).order_by(User.name, User.username)
-        )
-        return [dict(row._mapping) for row in rows]
+async def list_assignees(_: CurrentUser, session: ReadSession):
+    rows = await session.execute(
+        select(User.id, User.name, User.username).order_by(User.name, User.username)
+    )
+    return [
+        Assignee(id=user_id, name=name, username=username)
+        for user_id, name, username in rows
+    ]
 
 
-class Workspace(Base):
-    __tablename__ = "todo_workspaces"
-    key: Mapped[str] = mapped_column(String(64), primary_key=True)
-    revision: Mapped[int] = mapped_column(Integer, default=0)
-    tasks: Mapped[list] = mapped_column(JSON, default=list)
+def can_manage(user: User, task: TaskData) -> bool:
+    """The author, admins and trusted users may edit and delete a task."""
+    return user.is_admin or user.is_trusted or task.author_id == user.id
 
 
-class ChecklistItem(BaseModel):
-    id: UUID
-    text: str = Field(min_length=1, max_length=500)
-    done: bool = False
-
-    @field_validator("text")
-    @classmethod
-    def trim_text(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("Пункт чек-листа не может быть пустым")
-        return value.strip()
+def only_status_changed(previous: TaskData, value: TaskData) -> bool:
+    return previous.model_dump(include=PROTECTED_FIELDS) == value.model_dump(
+        include=PROTECTED_FIELDS
+    )
 
 
-class TaskData(BaseModel):
-    id: UUID
-    title: str = Field(min_length=1, max_length=200)
-    description: str = Field(default="", max_length=100000)
-    status: Literal["new", "in_progress", "done"] = "new"
-    assignee_id: UUID | None = None
-    checklist: list[ChecklistItem] = Field(default_factory=list, max_length=200)
-    due_date: date | None = None
-    due_at: AwareDatetime | None = None
-    author_id: UUID | None = None
-    created_at: datetime | None = None
-    updated_at: datetime | None = None
-
-    @field_validator("checklist")
-    @classmethod
-    def unique_items(cls, value: list[ChecklistItem]) -> list[ChecklistItem]:
-        if len({item.id for item in value}) != len(value):
-            raise ValueError("Повторяющиеся пункты чек-листа")
-        return value
-
-    @field_validator("title")
-    @classmethod
-    def trim_title(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("Название не может быть пустым")
-        return value.strip()
+def authorize_change(user: User, previous: TaskData, value: TaskData) -> None:
+    """Managers may change anything; the assignee may change only the status."""
+    if can_manage(user, previous):
+        return
+    if previous.assignee_id == user.id and only_status_changed(previous, value):
+        return
+    raise HTTPException(
+        403,
+        "Only the author, an admin or a trusted user can change a task; "
+        "the assignee can change only its status",
+    )
 
 
-class Changes(BaseModel):
-    revision: int = Field(ge=0)
-    upsert: list[TaskData] = Field(default_factory=list, max_length=5000)
-    delete: list[UUID] = Field(default_factory=list, max_length=5000)
+def workspace_key(user_id: UUID, scope: Scope) -> str:
+    return str(user_id) if scope == "private" else "shared"
 
 
-class Legacy(BaseModel):
-    tasks: list[TaskData] = Field(max_length=5000)
-
-
-async def workspace(session: AsyncSession, user_id: UUID, scope: Scope) -> Workspace:
-    key = str(user_id) if scope == "private" else "shared"
+async def lock_workspace(session: AsyncSession, key: str) -> Workspace:
     await session.execute(
         insert(Workspace).values(key=key, revision=0, tasks=[]).on_conflict_do_nothing()
     )
     return (
-        await session.scalars(select(Workspace).where(Workspace.key == key).with_for_update())
+        await session.scalars(
+            select(Workspace).where(Workspace.key == key).with_for_update()
+        )
     ).one()
 
 
-def snapshot(row: Workspace) -> dict:
-    return {"revision": row.revision, "tasks": row.tasks}
+def snapshot(row: Workspace | None) -> WorkspaceSnapshot:
+    """Stored JSON tasks as typed TaskData; old tasks get the default priority."""
+    if not row:
+        return WorkspaceSnapshot()
+    return WorkspaceSnapshot(
+        revision=row.revision,
+        tasks=[TaskData.model_validate(task) for task in row.tasks],
+    )
+
+
+def merged(
+    task: TaskData,
+    previous: TaskData | None,
+    user_id: UUID,
+    now: datetime,
+    importing: bool,
+) -> TaskData:
+    """`task` as it will be stored: fields the client left out keep their values."""
+    sent = task.model_fields_set
+    keep_due_at = previous and previous.due_date == task.due_date
+    return task.model_copy(
+        update={
+            "due_at": task.due_at
+            if not previous or "due_at" in sent
+            else (previous.due_at if keep_due_at else None),
+            "checklist": task.checklist
+            if not previous or "checklist" in sent
+            else previous.checklist,
+            "priority": task.priority
+            if not previous or "priority" in sent
+            else previous.priority,
+            "author_id": previous.author_id if previous else user_id,
+            "created_at": previous.created_at
+            if previous
+            else (task.created_at if importing and task.created_at else now),
+            "updated_at": task.updated_at if importing and task.updated_at else now,
+        }
+    )
 
 
 async def apply(
@@ -115,72 +138,74 @@ async def apply(
     user_id: UUID,
     deleted: list[UUID] | None = None,
     importing: bool = False,
+    authorize: Authorize | None = None,
 ) -> None:
     if len({task.id for task in tasks}) != len(tasks):
-        raise HTTPException(422, "Повторяющиеся задачи")
+        raise HTTPException(422, "Duplicate tasks")
     assignees = {task.assignee_id for task in tasks if task.assignee_id}
     if assignees:
-        known = set(await session.scalars(select(User.id).where(User.id.in_(assignees))))
+        known = set(
+            await session.scalars(select(User.id).where(User.id.in_(assignees)))
+        )
         if known != assignees:
-            raise HTTPException(422, "Исполнитель не найден")
-    current = {task["id"]: task for task in row.tasks}
+            raise HTTPException(422, "Assignee not found")
+    current = {task.id: task for task in snapshot(row).tasks}
     for task_id in deleted or []:
-        current.pop(str(task_id), None)
-    now = datetime.now(UTC).isoformat()
+        current.pop(task_id, None)
+    now = datetime.now(UTC)
     changed = bool(deleted)
     for task in tasks:
-        previous = current.get(str(task.id))
+        previous = current.get(task.id)
         if importing and previous:
             continue
-        value = task.model_dump(mode="json")
-        if previous and "due_at" not in task.model_fields_set:
-            value["due_at"] = (
-                previous.get("due_at") if value["due_date"] == previous.get("due_date") else None
-            )
-        if previous and "checklist" not in task.model_fields_set:
-            value["checklist"] = previous.get("checklist", [])
-        value["author_id"] = previous["author_id"] if previous else str(user_id)
-        value["created_at"] = (
-            previous["created_at"]
-            if previous
-            else (value["created_at"] if importing and value["created_at"] else now)
-        )
-        value["updated_at"] = value["updated_at"] if importing and value["updated_at"] else now
-        current[value["id"]] = value
+        value = merged(task, previous, user_id, now, importing)
+        if previous and authorize:
+            authorize(previous, value)
+        current[value.id] = value
         changed = True
-    if len(current) > 5000:
-        raise HTTPException(422, "Слишком много задач")
+    if len(current) > MAX_TASKS:
+        raise HTTPException(422, "Too many tasks")
     if changed:
-        row.tasks = list(current.values())
+        row.tasks = [task.model_dump(mode="json") for task in current.values()]
         row.revision += 1
 
 
-@router.get("/workspace/{scope}")
-async def read_workspace(scope: Scope, user: CurrentUser, factory: Factory):
-    async with factory.begin() as session:
-        return snapshot(await workspace(session, user.id, scope))
+@router.get("/workspace/{scope}", response_model=WorkspaceSnapshot)
+async def read_workspace(scope: Scope, user: CurrentUser, session: ReadSession):
+    return snapshot(await session.get(Workspace, workspace_key(user.id, scope)))
 
 
-@router.patch("/workspace/{scope}")
-async def save_workspace(scope: Scope, changes: Changes, user: CurrentUser, factory: Factory):
-    async with factory.begin() as session:
-        row = await workspace(session, user.id, scope)
-        if row.revision != changes.revision:
-            raise HTTPException(409, "Задачи изменились. Обновите раздел и повторите действие.")
-        deleted = {str(task_id) for task_id in changes.delete}
-        if not (user.is_admin or user.is_trusted) and any(
-            task["id"] in deleted and task["author_id"] != str(user.id) for task in row.tasks
-        ):
-            raise HTTPException(
-                403, "Удалять задачу может автор, администратор или доверенный пользователь"
-            )
-        await apply(session, row, changes.upsert, user.id, changes.delete)
-        return snapshot(row)
+@router.patch("/workspace/{scope}", response_model=WorkspaceSnapshot)
+async def save_workspace(
+    scope: Scope, changes: Changes, user: CurrentUser, session: WriteSession
+):
+    row = await lock_workspace(session, workspace_key(user.id, scope))
+    if row.revision != changes.revision:
+        raise HTTPException(
+            409, "Tasks have changed. Refresh the section and try again."
+        )
+    deleted = set(changes.delete)
+    if any(
+        task.id in deleted and not can_manage(user, task)
+        for task in snapshot(row).tasks
+    ):
+        raise HTTPException(
+            403, "Only the author, an admin or a trusted user can delete a task"
+        )
+
+    await apply(
+        session,
+        row,
+        changes.upsert,
+        user.id,
+        changes.delete,
+        authorize=lambda previous, value: authorize_change(user, previous, value),
+    )
+    return snapshot(row)
 
 
-@router.post("/import")
-async def import_legacy(payload: Legacy, user: CurrentUser, factory: Factory):
-    async with factory.begin() as session:
-        row = await workspace(session, user.id, "private")
-        await apply(session, row, payload.tasks, user.id, importing=True)
-        return snapshot(row)
+@router.post("/import", response_model=WorkspaceSnapshot)
+async def import_legacy(payload: Legacy, user: CurrentUser, session: WriteSession):
+    row = await lock_workspace(session, workspace_key(user.id, "private"))
+    await apply(session, row, payload.tasks, user.id, importing=True)
+    return snapshot(row)

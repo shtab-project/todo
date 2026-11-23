@@ -1,19 +1,20 @@
-"""Точка подключения к FastAPI ядра; отдельное приложение не создаётся."""
+"""Mounts the Todo routes into the core FastAPI app; no app of its own."""
 
 from fastapi import APIRouter, FastAPI
 from shtab_core.dependencies import CurrentUser
+
+from shtab_todo.schemas import Health
 from shtab_todo.workspace import router as workspace_router
 
 router = APIRouter(prefix="/api/plugins/todo", tags=["todo"])
 
 
-@router.get("/health")
+@router.get("/health", response_model=Health)
 async def health(_: CurrentUser):
-    """Подтверждение подключения backend, без хранилища задач."""
-    return {"plugin": "todo", "status": "ok"}
+    """Confirms the backend is mounted."""
+    return Health(plugin="todo")
 
 
 def register(app: FastAPI) -> None:
-    """Подключить роутер. Ручки задач будут добавлены следующим шагом."""
     app.include_router(router)
     app.include_router(workspace_router)

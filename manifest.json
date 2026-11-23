@@ -1,9 +1,10 @@
 {
   "id": "todo",
   "name": "Задачи",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "url": "local:todo",
   "backend_entrypoint": "shtab_todo.main:register",
+  "mcp_entrypoint": "shtab_todo.mcp:register_tools",
   "frontend": {
     "entry": "frontend/index.js",
     "pages": [

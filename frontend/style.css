@@ -73,12 +73,28 @@ h1 { display: flex; align-items: center; gap: 13px; font-size: 29px; font-weight
 .column-tasks { display: grid; gap: 10px; min-height: 60px; }
 .task-card { border: 1px solid var(--todo-line); border-radius: 11px; background: var(--todo-surface); min-width: 0; }
 .task-card:hover { border-color: color-mix(in srgb, var(--todo-accent) 35%, var(--todo-line)); }
+.task-card:has(.task-priority[data-priority="critical"]) { box-shadow: inset 3px 0 var(--danger, #b43645); }
 .task-card.dragging { opacity: .4; }
-.card-content { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 8px; width: 100%; padding: 12px; border-radius: inherit; text-align: left; overflow-wrap: anywhere; }
-.card-title { align-self: center; font-size: 16px; font-weight: 650; line-height: 1.35; }
-.card-description { grid-column: 1 / -1; color: var(--todo-muted); font-size: 16px; line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-line; }
-.card-content .checklist-progress { grid-column: 1 / -1; justify-self: start; padding: 2px 7px; border: 1px solid var(--todo-line); border-radius: 6px; background: var(--tab-active, #f0f0f5); }
-.task-card footer { display: flex; margin-inline: 12px; padding-block: 9px 11px; border-top: 1px solid var(--todo-line); }
+.card-content { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; width: 100%; padding: 12px; border-radius: inherit; text-align: left; overflow-wrap: anywhere; }
+.card-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.card-heading .avatar { flex: 0 0 auto; }
+.card-title { font-size: 16px; font-weight: 650; line-height: 1.35; }
+.card-description { color: var(--todo-muted); font-size: 16px; line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-line; }
+.task-priority {
+  grid-column: 1 / -1;
+  justify-self: start;
+  padding: 2px 7px;
+  border: 1px solid var(--todo-line);
+  border-radius: 6px;
+  color: var(--priority-color, var(--todo-muted));
+  background: color-mix(in srgb, currentColor 8%, var(--todo-surface));
+  font-size: 16px;
+  line-height: 1.35;
+}
+.task-priority[data-priority="critical"] { --priority-color: var(--danger, #b43645); }
+.task-priority[data-priority="light"] { --priority-color: var(--success, #33644f); }
+.task-card footer { display: flex; align-items: center; gap: 8px; margin-inline: 12px; padding-block: 9px 11px; border-top: 1px solid var(--todo-line); }
+.task-card footer .checklist-progress { flex: 0 0 auto; margin-inline-start: auto; padding: 2px 7px; border: 1px solid var(--todo-line); border-radius: 6px; background: var(--tab-active, #f0f0f5); }
 .task-deadline { display: inline-flex; align-items: baseline; gap: 7px; color: var(--todo-muted); font-size: 16px; line-height: 1.5; }
 .task-deadline svg { flex: 0 0 14px; width: 14px; height: 14px; align-self: center; }
 .task-deadline.overdue { color: var(--danger, #b43645); }

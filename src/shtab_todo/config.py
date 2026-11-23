@@ -1,1 +1,1 @@
-"""Настройки плагина: контракт передачи конфигурации ещё предстоит согласовать."""
+"""Plugin settings; how the core passes configuration is not agreed on yet."""

@@ -13,6 +13,12 @@ export const statuses = [
   { id: 'done', title: 'Готово' },
 ];
 
+export const priorities = [
+  { id: 'critical', title: 'Критический' },
+  { id: 'normal', title: 'Нормальный' },
+  { id: 'light', title: 'Лёгкий' },
+];
+
 export function validDueDate(value) {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value) || value.startsWith('0000')) return false;
   const date = new Date(`${value}T00:00:00Z`);
@@ -104,7 +110,7 @@ export class TaskStore {
       ...(payload && { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }),
     });
     if (response.status === 409) throw new Error('Задачи изменились у другого пользователя. Откройте раздел заново и повторите действие.');
-    if (response.status === 403) throw new Error('Недостаточно прав для удаления этой задачи.');
+    if (response.status === 403) throw new Error('Недостаточно прав для изменения этой задачи.');
     if (!response.ok) throw new Error('Не удалось сохранить или загрузить задачи. Повторите действие.');
     return response.json();
   }
@@ -152,6 +158,8 @@ export class TaskStore {
     if (dueDate !== null && !validDueDate(dueDate)) throw new Error('Укажите корректную дату срока выполнения.');
     const previous = id ? this.tasks.find((task) => task.id === id) : null;
     if (id && !previous) throw new Error('Задача уже удалена.');
+    const priority = input.priority ?? previous?.priority ?? 'normal';
+    if (!priorities.some((item) => item.id === priority)) throw new Error('Выберите срочность задачи.');
     let dueAt = input.due_at ?? previous?.due_at ?? null;
     if (Object.hasOwn(input, 'due_time')) {
       if (input.due_time && !dueDate) throw new Error('Для времени срока укажите дату.');
@@ -165,6 +173,7 @@ export class TaskStore {
       ...previous,
       id: previous?.id ?? createId(), title,
       description: input.description.trim(), status: input.status,
+      priority,
       assignee_id: input.assignee_id || null,
       due_date: dueDate,
       due_at: dueAt,
