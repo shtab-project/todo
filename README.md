@@ -44,6 +44,8 @@ todo/
 Общие задачи обновляются при открытии раздела или перезагрузке страницы.
 Правый клик открывает меню создания, открытия и удаления задачи.
 Удалять могут автор, администратор и доверенные пользователи; сервер проверяет права.
+Shared tasks: only the author, an admin or a trusted user may edit or delete a task;
+the assignee may change only its status. The server enforces this and returns `403`.
 
 ## БД
 

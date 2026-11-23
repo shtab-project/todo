@@ -1,12 +1,20 @@
-"""Данные задач плагина; пользователи принадлежат ядру Shtab."""
+"""The plugin's task data; users belong to the Shtab core."""
 
 import uuid
 from datetime import datetime
 from enum import StrEnum
-from typing import ClassVar
 
 from shtab_core.models import User
-from sqlalchemy import CheckConstraint, DateTime, Enum, ForeignKey, String, Text, func
+from sqlalchemy import (
+    JSON,
+    CheckConstraint,
+    DateTime,
+    Enum,
+    ForeignKey,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 from uuid6 import uuid7
 
@@ -20,6 +28,14 @@ class TaskStatus(StrEnum):
     DONE = "done"
 
 
+class Workspace(Base):
+    __tablename__ = "todo_workspaces"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    revision: Mapped[int] = mapped_column(default=0)
+    tasks: Mapped[list] = mapped_column(JSON, default=list)
+
+
 class Task(Base):
     __tablename__ = "todo_tasks"
     __table_args__ = (
@@ -27,7 +43,8 @@ class Task(Base):
             "length(trim(title)) > 0", name="ck_todo_tasks_title_not_blank"
         ),
     )
-    __mapper_args__: ClassVar[dict[str, bool]] = {"eager_defaults": True}
+    # SQLAlchemy reads this once at class creation; ClassVar clashes with its typing.
+    __mapper_args__ = {"eager_defaults": True}  # noqa: RUF012
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
     title: Mapped[str] = mapped_column(String(TASK_TITLE_MAX_LENGTH))

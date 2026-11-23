@@ -1,4 +1,4 @@
-import { TaskStore, statuses, createId, deadlineParts, isOverdue } from './store.js';
+import { TaskStore, statuses, priorities, createId, deadlineParts, isOverdue } from './store.js';
 
 const escape = (value = '') => String(value).replace(/[&<>"']/g, (character) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
@@ -88,6 +88,7 @@ class TodoElement extends HTMLElement {
         <div class="form-body">
           <label>Название <span class="required">*</span><input name="title" maxlength="200" required placeholder="Что нужно сделать?" autocomplete="off"></label>
           <label>Описание<textarea name="description" rows="4" placeholder="Детали, ссылки, мысли — всё, что пригодится"></textarea></label>
+          <label>Срочность<select name="priority">${priorities.map(({ id, title }) => `<option value="${id}">${title}</option>`).join('')}</select></label>
           <section class="checklist-editor" aria-labelledby="checklist-heading">
             <h3 id="checklist-heading">Чек-лист</h3>
             <div class="checklist-items"></div>
@@ -244,20 +245,23 @@ class TodoElement extends HTMLElement {
   }
 
   statusSelect(task) {
-    return `<select class="task-status ${task.status}" data-task-status="${escape(task.id)}" aria-label="Статус: ${escape(task.title)}">${statusOptions(task.status)}</select>`;
+    return `<select class="task-status ${task.status}" data-task-status="${escape(task.id)}"${this.canChangeStatus(task) ? '' : ' disabled'} aria-label="Статус: ${escape(task.title)}">${statusOptions(task.status)}</select>`;
   }
 
   card(task) {
     const assignee = this.assignee(task);
     const deadline = this.deadline(task);
-    return `<article class="task-card ${task.status}${isOverdue(task) ? ' overdue' : ''}" draggable="true" data-task="${escape(task.id)}">
+    const checklist = this.checklistProgress(task);
+    return `<article class="task-card ${task.status}${isOverdue(task) ? ' overdue' : ''}" draggable="${this.canChangeStatus(task)}" data-task="${escape(task.id)}">
       <button class="card-content" type="button" data-action="edit" data-id="${escape(task.id)}">
+        <span class="card-heading">
+          ${this.priorityLabel(task)}
+          ${assignee ? `<span class="avatar assigned" title="${escape(assignee)}">${escape(this.initials(assignee))}</span>` : ''}
+        </span>
         <span class="card-title">${escape(task.title)}</span>
-        ${assignee ? `<span class="avatar assigned" title="${escape(assignee)}">${escape(this.initials(assignee))}</span>` : ''}
         ${task.description ? `<span class="card-description">${escape(task.description)}</span>` : ''}
-        ${this.checklistProgress(task)}
       </button>
-      ${deadline ? `<footer>${deadline}</footer>` : ''}</article>`;
+      ${deadline || checklist ? `<footer>${deadline}${checklist}</footer>` : ''}</article>`;
   }
 
   deadline(task) {
@@ -276,8 +280,8 @@ class TodoElement extends HTMLElement {
   row(task) {
     const assignee = this.assignee(task);
     const date = new Intl.DateTimeFormat('ru', { day: 'numeric', month: 'short' }).format(new Date(task.updated_at));
-    return `<li class="task-row ${task.status}"><button class="complete-button" data-action="complete" data-id="${escape(task.id)}" aria-label="${task.status === 'done' ? 'Вернуть в новые' : 'Завершить'}: ${escape(task.title)}">${task.status === 'done' ? icon('check') : ''}</button>
-      <button class="row-content" data-action="edit" data-id="${escape(task.id)}"><span class="row-title">${escape(task.title)}</span>${this.checklistProgress(task)}${task.description ? `<span class="row-description">${escape(task.description)}</span>` : ''}${this.deadline(task)}</button>
+    return `<li class="task-row ${task.status}"><button class="complete-button" data-action="complete" data-id="${escape(task.id)}"${this.canChangeStatus(task) ? '' : ' disabled'} aria-label="${task.status === 'done' ? 'Вернуть в новые' : 'Завершить'}: ${escape(task.title)}">${task.status === 'done' ? icon('check') : ''}</button>
+      <button class="row-content" data-action="edit" data-id="${escape(task.id)}"><span class="row-title">${escape(task.title)}</span>${this.priorityLabel(task)}${this.checklistProgress(task)}${task.description ? `<span class="row-description">${escape(task.description)}</span>` : ''}${this.deadline(task)}</button>
       <div class="row-details">
         ${this.statusSelect(task)}
         <span class="row-assignee" title="${escape(assignee || 'Без исполнителя')}">
@@ -286,6 +290,11 @@ class TodoElement extends HTMLElement {
         </span>
         <time class="row-date" datetime="${escape(task.updated_at)}" title="Дата обновления">${icon('calendar')}${date}</time>
       </div></li>`;
+  }
+
+  priorityLabel(task) {
+    const { id, title } = priorities.find((item) => item.id === (task.priority ?? 'normal'));
+    return `<span class="task-priority" data-priority="${id}" title="Срочность задачи">${title}</span>`;
   }
 
   checklistProgress(task) {
@@ -435,6 +444,7 @@ class TodoElement extends HTMLElement {
     form.reset();
     form.elements.title.value = task?.title ?? '';
     form.elements.description.value = task?.description ?? '';
+    form.elements.priority.value = task?.priority ?? 'normal';
     dialog.querySelector('.checklist-items').innerHTML = (task?.checklist ?? []).map((item) => this.checklistRow(item)).join('');
     this.updateChecklistControls();
     const deadline = deadlineParts(task);
@@ -445,6 +455,15 @@ class TodoElement extends HTMLElement {
     form.elements.assignee_id.value = task?.assignee_id ?? '';
     dialog.querySelector('h2').textContent = task ? 'Задача' : 'Новая задача';
     dialog.querySelector('[type="submit"]').textContent = task ? 'Сохранить изменения' : 'Создать задачу';
+    const editable = !task || this.canEdit(task);
+    this.editingStatusOnly = !editable && this.canChangeStatus(task);
+    form.querySelectorAll('.form-body input, .form-body textarea, .form-body select, .checklist-editor button')
+      .forEach((element) => { element.disabled = !editable; });
+    form.elements.status.disabled = !(editable || this.editingStatusOnly);
+    if (editable) this.updateChecklistControls();
+    const submit = dialog.querySelector('[type="submit"]');
+    submit.hidden = !(editable || this.editingStatusOnly);
+    if (this.editingStatusOnly) submit.textContent = 'Сохранить статус';
     dialog.querySelector('[data-action="delete"]').hidden = !task || !this.canDelete(task);
     dialog.querySelector('.delete-confirm').hidden = true;
     dialog.querySelector('.form-error').hidden = true;
@@ -459,7 +478,12 @@ class TodoElement extends HTMLElement {
     if (submit.disabled) return;
     submit.disabled = true;
     try {
-      await this.store.save({ ...Object.fromEntries(new FormData(form)), checklist: this.readChecklist() }, this.editingId);
+      if (this.editingStatusOnly) {
+        // Отключённые поля не попадают в FormData — меняем только статус.
+        await this.store.changeStatus(this.editingId, form.elements.status.value);
+      } else {
+        await this.store.save({ ...Object.fromEntries(new FormData(form)), checklist: this.readChecklist() }, this.editingId);
+      }
       this.shadowRoot.querySelector('dialog').close();
       this.renderTasks();
       this.notify(this.editingId ? 'Изменения сохранены' : 'Задача создана');
@@ -479,8 +503,18 @@ class TodoElement extends HTMLElement {
     this.toastTimer = setTimeout(() => { this.shadowRoot.querySelector('.toast').textContent = ''; }, 3500);
   }
 
-  canDelete(task) {
+  // Те же правила, что на сервере: автор, администратор или доверенный правят и удаляют,
+  // исполнитель чужой задачи меняет только статус.
+  canEdit(task) {
     return task.author_id === this.user.id || this.user.is_admin || this.user.is_trusted;
+  }
+
+  canDelete(task) {
+    return this.canEdit(task);
+  }
+
+  canChangeStatus(task) {
+    return this.canEdit(task) || task.assignee_id === this.user.id;
   }
 
   closeMenu(restoreFocus = false) {

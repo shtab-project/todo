@@ -1,44 +1,59 @@
 """Exercise authorization and concurrency through the HTTP boundary."""
 
 from types import SimpleNamespace
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
-from shtab_todo.db import Base
-from shtab_todo.workspace import router
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-
 from shtab_core.db import get_session_factory
 from shtab_core.dependencies import current_user
 from shtab_core.models import User
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from shtab_todo.db import Base
+from shtab_todo.workspace import router
 
 
 @pytest_asyncio.fixture
 async def api():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+
     async with engine.begin() as connection:
-        await connection.run_sync(User.__table__.create)
-        await connection.run_sync(lambda sync: Base.metadata.tables["todo_workspaces"].create(sync))
+        await connection.run_sync(
+            lambda sync: User.metadata.tables["users"].create(sync)
+        )
+        await connection.run_sync(
+            lambda sync: Base.metadata.tables["todo_workspaces"].create(sync)
+        )
+
     factory = async_sessionmaker(engine, expire_on_commit=False)
     user = SimpleNamespace(id=uuid4(), is_admin=False, is_trusted=False)
+
     async with factory.begin() as session:
         session.add_all(
             [
                 User(id=user.id, oidc_sub="owner", username="owner", name="Owner"),
-                User(id=uuid4(), oidc_sub="colleague", username="colleague", name="Colleague"),
+                User(
+                    id=uuid4(),
+                    oidc_sub="colleague",
+                    username="colleague",
+                    name="Colleague",
+                ),
             ]
         )
+
     app = FastAPI()
     app.include_router(router)
     app.dependency_overrides[current_user] = lambda: user
     app.dependency_overrides[get_session_factory] = lambda: factory
+
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as client:
         yield client, user
+
     await engine.dispose()
 
 
@@ -57,7 +72,9 @@ async def test_assign_colleague_and_preserve_assignment_on_edit(api):
     state = saved.json()
     assert state["tasks"][0]["assignee_id"] == colleague["id"]
     task.update(status="done")
-    updated = await client.patch(path, json={"revision": state["revision"], "upsert": [task]})
+    updated = await client.patch(
+        path, json={"revision": state["revision"], "upsert": [task]}
+    )
     assert updated.status_code == 200
     assert updated.json()["tasks"][0]["assignee_id"] == colleague["id"]
 
@@ -72,16 +89,25 @@ async def test_personal_isolation_and_shared_visibility(api):
         assert response.status_code == 200
         assert response.json()["tasks"][0]["due_date"] == "2026-11-20"
     user.id = uuid4()
-    assert (await client.get("/api/plugins/todo/workspace/private")).json()["tasks"] == []
-    assert len((await client.get("/api/plugins/todo/workspace/shared")).json()["tasks"]) == 1
+    assert (await client.get("/api/plugins/todo/workspace/private")).json()[
+        "tasks"
+    ] == []
+    assert (
+        len((await client.get("/api/plugins/todo/workspace/shared")).json()["tasks"])
+        == 1
+    )
 
 
 @pytest.mark.asyncio
 async def test_conflict_preserves_task_and_import_is_idempotent(api):
     client, _ = api
     task = {"id": str(uuid4()), "title": "Import"}
-    first = (await client.post("/api/plugins/todo/import", json={"tasks": [task]})).json()
-    second = (await client.post("/api/plugins/todo/import", json={"tasks": [task]})).json()
+    first = (
+        await client.post("/api/plugins/todo/import", json={"tasks": [task]})
+    ).json()
+    second = (
+        await client.post("/api/plugins/todo/import", json={"tasks": [task]})
+    ).json()
     assert first == second
     path = "/api/plugins/todo/workspace/private"
     stale = await client.patch(path, json={"revision": 0, "delete": [task["id"]]})
@@ -109,16 +135,24 @@ async def test_delete_permissions(api, role):
         user.id = uuid4()
     user.is_admin = role == "admin"
     user.is_trusted = role == "trusted"
-    forged = await client.patch(
+    edited = await client.patch(
         path,
         json={
             "revision": state["revision"],
-            "upsert": [{**task, "author_id": str(user.id)}],
+            "upsert": [{**task, "title": "Changed", "author_id": str(user.id)}],
         },
     )
-    state = forged.json()
+    if role == "stranger":
+        assert edited.status_code == 403
+        assert (await client.get(path)).json() == state
+    else:
+        assert edited.status_code == 200
+        state = edited.json()
+        assert state["tasks"][0]["title"] == "Changed"
     assert state["tasks"][0]["author_id"] == str(author)
-    deleted = await client.patch(path, json={"revision": state["revision"], "delete": [task["id"]]})
+    deleted = await client.patch(
+        path, json={"revision": state["revision"], "delete": [task["id"]]}
+    )
     if role == "stranger":
         assert deleted.status_code == 403
         assert (await client.get(path)).json() == state
@@ -128,35 +162,84 @@ async def test_delete_permissions(api, role):
 
 
 @pytest.mark.asyncio
+async def test_assignee_can_change_only_status(api):
+    client, user = api
+    path = "/api/plugins/todo/workspace/shared"
+    people = (await client.get("/api/plugins/todo/assignees")).json()
+    assignee = next(
+        person["id"] for person in people if person["username"] == "colleague"
+    )
+    task = {
+        "id": str(uuid4()),
+        "title": "Assigned",
+        "description": "Details",
+        "assignee_id": assignee,
+        "due_at": "2026-11-20T10:00:00.000Z",
+        "due_date": "2026-11-20",
+    }
+    state = (await client.patch(path, json={"revision": 0, "upsert": [task]})).json()
+    user.id = UUID(assignee)
+    moved = await client.patch(
+        path,
+        json={
+            "revision": state["revision"],
+            "upsert": [{**task, "status": "in_progress"}],
+        },
+    )
+    assert moved.status_code == 200
+    state = moved.json()
+    assert state["tasks"][0]["status"] == "in_progress"
+    for change in ({"title": "Renamed"}, {"assignee_id": None}, {"description": ""}):
+        response = await client.patch(
+            path, json={"revision": state["revision"], "upsert": [{**task, **change}]}
+        )
+        assert response.status_code == 403
+    deleted = await client.patch(
+        path, json={"revision": state["revision"], "delete": [task["id"]]}
+    )
+    assert deleted.status_code == 403
+    assert (await client.get(path)).json() == state
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("scope", ["private", "shared"])
 async def test_checklist_roundtrip_reorder_and_independent_status(api, scope):
     client, _ = api
     path = f"/api/plugins/todo/workspace/{scope}"
-    first = {"id": str(uuid4()), "text": "  Первый пункт  ", "done": False}
-    second = {"id": str(uuid4()), "text": "Второй пункт", "done": True}
-    task = {"id": str(uuid4()), "title": "Список", "checklist": [first, second]}
+    first = {"id": str(uuid4()), "text": "  First item  ", "done": False}
+    second = {"id": str(uuid4()), "text": "Second item", "done": True}
+    task = {"id": str(uuid4()), "title": "List", "checklist": [first, second]}
     response = await client.patch(path, json={"revision": 0, "upsert": [task]})
     assert response.status_code == 200
     state = response.json()
     saved = state["tasks"][0]
-    assert saved["checklist"][0]["text"] == "Первый пункт"
+    assert saved["checklist"][0]["text"] == "First item"
     assert (await client.get(path)).json() == state
     # Completing a task preserves unfinished items; old clients preserve the checklist.
-    response = await client.patch(path, json={
-        "revision": state["revision"],
-        "upsert": [{"id": task["id"], "title": "Список", "status": "done"}],
-    })
+    response = await client.patch(
+        path,
+        json={
+            "revision": state["revision"],
+            "upsert": [{"id": task["id"], "title": "List", "status": "done"}],
+        },
+    )
     state = response.json()
     assert state["tasks"][0]["checklist"] == saved["checklist"]
     assert not state["tasks"][0]["checklist"][0]["done"]
     # Reorder, edit and complete all items without completing the parent.
-    task.update(status="new", checklist=[second, {**first, "text": "Изменён", "done": True}])
-    response = await client.patch(path, json={"revision": state["revision"], "upsert": [task]})
+    task.update(
+        status="new", checklist=[second, {**first, "text": "Changed", "done": True}]
+    )
+    response = await client.patch(
+        path, json={"revision": state["revision"], "upsert": [task]}
+    )
     state = response.json()
     assert state["tasks"][0]["status"] == "new"
     assert state["tasks"][0]["checklist"] == task["checklist"]
     task["checklist"] = []
-    response = await client.patch(path, json={"revision": state["revision"], "upsert": [task]})
+    response = await client.patch(
+        path, json={"revision": state["revision"], "upsert": [task]}
+    )
     assert response.json()["tasks"][0]["checklist"] == []
 
 
@@ -164,22 +247,76 @@ async def test_checklist_roundtrip_reorder_and_independent_status(api, scope):
 async def test_invalid_checklist_does_not_change_workspace(api):
     client, _ = api
     path = "/api/plugins/todo/workspace/private"
-    item = {"id": str(uuid4()), "text": "Пункт", "done": False}
-    for checklist in ([{**item, "text": "   "}], [item, item],
-                      [{**item, "text": "x" * 501}], [item] * 201):
-        response = await client.patch(path, json={
-            "revision": 0, "upsert": [{"id": str(uuid4()), "title": "Список", "checklist": checklist}],
-        })
+    item = {"id": str(uuid4()), "text": "Item", "done": False}
+    for checklist in (
+        [{**item, "text": "   "}],
+        [item, item],
+        [{**item, "text": "x" * 501}],
+        [item] * 201,
+    ):
+        response = await client.patch(
+            path,
+            json={
+                "revision": 0,
+                "upsert": [
+                    {"id": str(uuid4()), "title": "List", "checklist": checklist}
+                ],
+            },
+        )
         assert response.status_code == 422
     assert (await client.get(path)).json() == {"revision": 0, "tasks": []}
+
+
+@pytest.mark.asyncio
+async def test_priority_roundtrip_and_legacy_edit(api):
+    client, _ = api
+    path = "/api/plugins/todo/workspace/private"
+    task = {"id": str(uuid4()), "title": "Task"}
+    response = await client.patch(path, json={"revision": 0, "upsert": [task]})
+    state = response.json()
+    assert state["tasks"][0]["priority"] == "normal"
+
+    for priority in ("critical", "light"):
+        response = await client.patch(
+            path,
+            json={
+                "revision": state["revision"],
+                "upsert": [{**task, "priority": priority}],
+            },
+        )
+        state = response.json()
+        assert state["tasks"][0]["priority"] == priority
+
+    response = await client.patch(
+        path,
+        json={
+            "revision": state["revision"],
+            "upsert": [{**task, "status": "done"}],
+        },
+    )
+    state = response.json()
+    assert state["tasks"][0]["priority"] == "light"
+    response = await client.patch(
+        path,
+        json={
+            "revision": state["revision"],
+            "upsert": [{**task, "priority": "unknown"}],
+        },
+    )
+    assert response.status_code == 422
+    assert (await client.get(path)).json() == state
 
 
 @pytest.mark.asyncio
 async def test_deadline_time_roundtrip_and_legacy_edit(api):
     client, _ = api
     path = "/api/plugins/todo/workspace/private"
-    task = {"id": str(uuid4()), "title": "К 18:00", "due_date": "2026-11-17",
-            "due_at": "2026-11-17T15:00:00Z"}
+    task = {
+        "id": str(uuid4()),
+        "title": "By 18:00",
+        "due_date": "2026-11-17",
+        "due_at": "2026-11-17T15:00:00Z",
+    }
     response = await client.patch(path, json={"revision": 0, "upsert": [task]})
     assert response.status_code == 200
     state = response.json()
@@ -187,20 +324,33 @@ async def test_deadline_time_roundtrip_and_legacy_edit(api):
     # A date-only client must preserve the time when changing unrelated fields.
     task.pop("due_at")
     task["status"] = "done"
-    response = await client.patch(path, json={"revision": state["revision"], "upsert": [task]})
+    response = await client.patch(
+        path, json={"revision": state["revision"], "upsert": [task]}
+    )
     state = response.json()
     assert state["tasks"][0]["due_at"] == "2026-11-17T15:00:00Z"
     # Changing the date through an old client clears the stale precise deadline.
     task["due_date"] = "2026-11-18"
-    response = await client.patch(path, json={"revision": state["revision"], "upsert": [task]})
+    response = await client.patch(
+        path, json={"revision": state["revision"], "upsert": [task]}
+    )
     assert response.json()["tasks"][0]["due_at"] is None
 
 
 @pytest.mark.asyncio
 async def test_deadline_requires_timezone(api):
     client, _ = api
-    response = await client.patch("/api/plugins/todo/workspace/private", json={
-        "revision": 0, "upsert": [{"id": str(uuid4()), "title": "Срок",
-                                    "due_at": "2026-11-17T18:00:00"}],
-    })
+    response = await client.patch(
+        "/api/plugins/todo/workspace/private",
+        json={
+            "revision": 0,
+            "upsert": [
+                {
+                    "id": str(uuid4()),
+                    "title": "Deadline",
+                    "due_at": "2026-11-17T18:00:00",
+                }
+            ],
+        },
+    )
     assert response.status_code == 422

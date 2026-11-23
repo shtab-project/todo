@@ -1,1 +1,1 @@
-"""Плагин задач Shtab."""
+"""Shtab tasks plugin."""

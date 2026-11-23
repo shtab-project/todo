@@ -1,4 +1,4 @@
-"""Общая фабрика сессий ядра и отдельные метаданные таблиц Todo."""
+"""The core's shared session factory and Todo's own table metadata."""
 
 from shtab_core.db import get_session_factory
 from sqlalchemy.orm import DeclarativeBase
